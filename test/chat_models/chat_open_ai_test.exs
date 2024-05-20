@@ -75,7 +75,7 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
     end
   end
 
-  describe "for_api/3" do
+  describe "for_api/4" do
     test "generates a map for an API call" do
       {:ok, openai} =
         ChatOpenAI.new(%{
@@ -85,7 +85,7 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
           "api_key" => "api_key"
         })
 
-      data = ChatOpenAI.for_api(openai, [], [])
+      data = ChatOpenAI.for_api(openai, [], [], nil)
       assert data.model == @test_model
       assert data.temperature == 1
       assert data.frequency_penalty == 0.5
@@ -101,7 +101,7 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
           "json_response" => true
         })
 
-      data = ChatOpenAI.for_api(openai, [], [])
+      data = ChatOpenAI.for_api(openai, [], [], nil)
       assert data.model == @test_model
       assert data.temperature == 1
       assert data.frequency_penalty == 0.5
@@ -117,11 +117,28 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
           "max_tokens" => 1234
         })
 
-      data = ChatOpenAI.for_api(openai, [], [])
+      data = ChatOpenAI.for_api(openai, [], [], nil)
       assert data.model == @test_model
       assert data.temperature == 1
       assert data.frequency_penalty == 0.5
       assert data.max_tokens == 1234
+    end
+
+    test "doesn't set tool_choice when nil" do
+      assert {:ok, %ChatOpenAI{} = chat} = ChatOpenAI.new(%{})
+      data = ChatOpenAI.for_api(chat, [], [], nil)
+
+      assert !Map.has_key?(data, :tool_choice)
+    end
+
+    test "sets the tool_choice" do
+      assert {:ok, %ChatOpenAI{} = chat} = ChatOpenAI.new(%{})
+      data = ChatOpenAI.for_api(chat, [], [], "information_extraction")
+
+      assert data.tool_choice == %{
+               "type" => "function",
+               "function" => %{"name" => "information_extraction"}
+             }
     end
   end
 
@@ -178,7 +195,11 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
     end
 
     test "turns an image ContentPart into the expected JSON format with detail option" do
-      expected = %{"type" => "image_url", "image_url" => %{"url" => "image_base64_data", "detail" => "low"}}
+      expected = %{
+        "type" => "image_url",
+        "image_url" => %{"url" => "image_base64_data", "detail" => "low"}
+      }
+
       result = ChatOpenAI.for_api(ContentPart.image!("image_base64_data", detail: "low"))
       assert result == expected
     end
@@ -217,7 +238,11 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
     end
 
     test "turns an image_url ContentPart into the expected JSON format with detail option" do
-      expected = %{"type" => "image_url", "image_url" => %{"url" => "url-to-image", "detail" => "low"}}
+      expected = %{
+        "type" => "image_url",
+        "image_url" => %{"url" => "url-to-image", "detail" => "low"}
+      }
+
       result = ChatOpenAI.for_api(ContentPart.image_url!("url-to-image", detail: "low"))
       assert result == expected
     end
@@ -974,7 +999,13 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
         Message.new_user("Answer the following math question: What is 100 + 300 - 200?")
 
       response =
-        ChatOpenAI.do_api_request(chat, [message], [LangChain.Tools.Calculator.new!()], callback)
+        ChatOpenAI.do_api_request(
+          chat,
+          [message],
+          [LangChain.Tools.Calculator.new!()],
+          nil,
+          callback
+        )
 
       IO.inspect(response, label: "OPEN AI POST RESPONSE")
 

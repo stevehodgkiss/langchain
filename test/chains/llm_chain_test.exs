@@ -94,6 +94,16 @@ defmodule LangChain.Chains.LLMChainTest do
     end
   end
 
+  describe "set_tool_choice/2" do
+    test "sets the tool choice", %{chat: chat} do
+      assert {:ok, %LLMChain{} = chain} = LLMChain.new(%{prompt: [], llm: chat})
+      assert chain.tool_choice == nil
+
+      updated_chain = LLMChain.set_tool_choice(chain, "information_extraction")
+      assert updated_chain.tool_choice == "information_extraction"
+    end
+  end
+
   describe "cancelled_delta/1" do
     test "does nothing when no delta is present" do
       model = ChatOpenAI.new!(%{temperature: 1, stream: true})
@@ -780,7 +790,6 @@ defmodule LangChain.Chains.LLMChainTest do
 
       assert reason =~ ~r/PromptTemplates must be/
     end
-
   end
 
   describe "update_custom_context/3" do

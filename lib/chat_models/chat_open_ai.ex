@@ -137,10 +137,15 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   @doc """
   Return the params formatted for an API request.
   """
-  @spec for_api(t | Message.t() | Function.t(), message :: [map()], ChatModel.tools()) :: %{
+  @spec for_api(
+          t | Message.t() | Function.t(),
+          message :: [map()],
+          ChatModel.tools(),
+          tool_choice :: binary() | nil
+        ) :: %{
           atom() => any()
         }
-  def for_api(%ChatOpenAI{} = openai, messages, tools) do
+  def for_api(%ChatOpenAI{} = openai, messages, tools, tool_choice) do
     %{
       model: openai.model,
       temperature: openai.temperature,
@@ -166,6 +171,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
     |> Utils.conditionally_add_to_map(:max_tokens, openai.max_tokens)
     |> Utils.conditionally_add_to_map(:seed, openai.seed)
     |> Utils.conditionally_add_to_map(:tools, get_tools_for_api(tools))
+    |> Utils.conditionally_add_to_map(:tool_choice, get_tool_choice_for_api(tool_choice))
   end
 
   defp get_tools_for_api(nil), do: []
@@ -175,6 +181,12 @@ defmodule LangChain.ChatModels.ChatOpenAI do
       %Function{} = function ->
         %{"type" => "function", "function" => for_api(function)}
     end)
+  end
+
+  defp get_tool_choice_for_api(nil), do: nil
+
+  defp get_tool_choice_for_api(tool_choice) do
+    %{"type" => "function", "function" => %{"name" => tool_choice}}
   end
 
   defp set_response_format(%ChatOpenAI{json_response: true}),
@@ -338,18 +350,20 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   `LangChain.Message` once fully complete.
   """
   @impl ChatModel
-  def call(openai, prompt, tools \\ [], callback_fn \\ nil)
+  def call(openai, prompt, tools \\ [], tool_choice \\ nil, callback_fn \\ nil)
 
-  def call(%ChatOpenAI{} = openai, prompt, tools, callback_fn) when is_binary(prompt) do
+  def call(%ChatOpenAI{} = openai, prompt, tools, tool_choice, callback_fn)
+      when is_binary(prompt) do
     messages = [
       Message.new_system!(),
       Message.new_user!(prompt)
     ]
 
-    call(openai, messages, tools, callback_fn)
+    call(openai, messages, tools, tool_choice, callback_fn)
   end
 
-  def call(%ChatOpenAI{} = openai, messages, tools, callback_fn) when is_list(messages) do
+  def call(%ChatOpenAI{} = openai, messages, tools, tool_choice, callback_fn)
+      when is_list(messages) do
     if override_api_return?() do
       Logger.warning("Found override API response. Will not make live API call.")
 
@@ -370,7 +384,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
     else
       try do
         # make base api request and perform high-level success/failure checks
-        case do_api_request(openai, messages, tools, callback_fn) do
+        case do_api_request(openai, messages, tools, tool_choice, callback_fn) do
           {:error, reason} ->
             {:error, reason}
 
@@ -403,11 +417,11 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   # structures.
   # Retries the request up to 3 times on transient errors with a 1 second delay
   @doc false
-  @spec do_api_request(t(), [Message.t()], ChatModel.tools(), (any() -> any())) ::
+  @spec do_api_request(t(), [Message.t()], ChatModel.tools(), any(), (any() -> any())) ::
           list() | struct() | {:error, String.t()}
-  def do_api_request(openai, messages, tools, callback_fn, retry_count \\ 3)
+  def do_api_request(openai, messages, tools, tool_choice, callback_fn, retry_count \\ 3)
 
-  def do_api_request(_openai, _messages, _tools, _callback_fn, 0) do
+  def do_api_request(_openai, _messages, _tools, _tool_choice, _callback_fn, 0) do
     raise LangChainError, "Retries exceeded. Connection failed."
   end
 
@@ -415,13 +429,14 @@ defmodule LangChain.ChatModels.ChatOpenAI do
         %ChatOpenAI{stream: false} = openai,
         messages,
         tools,
+        tool_choice,
         callback_fn,
         retry_count
       ) do
     req =
       Req.new(
         url: openai.endpoint,
-        json: for_api(openai, messages, tools),
+        json: for_api(openai, messages, tools, tool_choice),
         # required for OpenAI API
         auth: {:bearer, get_api_key(openai)},
         # required for Azure OpenAI version
@@ -455,7 +470,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
       {:error, %Mint.TransportError{reason: :closed}} ->
         # Force a retry by making a recursive call decrementing the counter
         Logger.debug(fn -> "Mint connection closed: retry count = #{inspect(retry_count)}" end)
-        do_api_request(openai, messages, tools, callback_fn, retry_count - 1)
+        do_api_request(openai, messages, tools, tool_choice, callback_fn, retry_count - 1)
 
       other ->
         Logger.error("Unexpected and unhandled API response! #{inspect(other)}")
@@ -467,12 +482,13 @@ defmodule LangChain.ChatModels.ChatOpenAI do
         %ChatOpenAI{stream: true} = openai,
         messages,
         tools,
+        tool_choice,
         callback_fn,
         retry_count
       ) do
     Req.new(
       url: openai.endpoint,
-      json: for_api(openai, messages, tools),
+      json: for_api(openai, messages, tools, tool_choice),
       # required for OpenAI API
       auth: {:bearer, get_api_key(openai)},
       # required for Azure OpenAI version
@@ -498,7 +514,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
       {:error, %Mint.TransportError{reason: :closed}} ->
         # Force a retry by making a recursive call decrementing the counter
         Logger.debug(fn -> "Mint connection closed: retry count = #{inspect(retry_count)}" end)
-        do_api_request(openai, messages, tools, callback_fn, retry_count - 1)
+        do_api_request(openai, messages, tools, tool_choice, callback_fn, retry_count - 1)
 
       other ->
         Logger.error(
@@ -577,8 +593,10 @@ defmodule LangChain.ChatModels.ChatOpenAI do
 
   # Full message with tool call
   def do_process_response(
-        %{"finish_reason" => "tool_calls", "message" => %{"tool_calls" => calls} = message} = data
-      ) do
+        %{"finish_reason" => finish_reason, "message" => %{"tool_calls" => calls} = message} =
+          data
+      )
+      when finish_reason in ["tool_calls", "stop"] do
     case Message.new(%{
            "role" => "assistant",
            "content" => message["content"],
