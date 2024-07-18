@@ -69,7 +69,6 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   use Ecto.Schema
   require Logger
   import Ecto.Changeset
-  import LangChain.Utils.ApiOverride
   alias __MODULE__
   alias LangChain.Config
   alias LangChain.ChatModels.ChatModel
@@ -443,40 +442,19 @@ defmodule LangChain.ChatModels.ChatOpenAI do
     call(openai, messages, tools, tool_choice)
   end
 
-  def call(%ChatOpenAI{} = openai, messages, tools, tool_choice)
-      when is_list(messages) do
-    if override_api_return?() do
-      Logger.warning("Found override API response. Will not make live API call.")
+  def call(%ChatOpenAI{} = openai, messages, tools, tool_choice) when is_list(messages) do
+    try do
+      # make base api request and perform high-level success/failure checks
+      case do_api_request(openai, messages, tools, tool_choice) do
+        {:error, reason} ->
+          {:error, reason}
 
-      case get_api_override() do
-        {:ok, {:ok, data, callback_name}} ->
-          # fire callback for fake responses too
-          Callbacks.fire(openai.callbacks, callback_name, [openai, data])
-          # return the data portion
-          {:ok, data}
-
-        # fake error response
-        {:ok, {:error, _reason} = response} ->
-          response
-
-        _other ->
-          raise LangChainError,
-                "An unexpected fake API response was set. Should be an `{:ok, value, nil_or_callback_name}`"
+        parsed_data ->
+          {:ok, parsed_data}
       end
-    else
-      try do
-        # make base api request and perform high-level success/failure checks
-        case do_api_request(openai, messages, tools, tool_choice) do
-          {:error, reason} ->
-            {:error, reason}
-
-          parsed_data ->
-            {:ok, parsed_data}
-        end
-      rescue
-        err in LangChainError ->
-          {:error, err.message}
-      end
+    rescue
+      err in LangChainError ->
+        {:error, err.message}
     end
   end
 
@@ -630,7 +608,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   buffer data from a previous call, and assembling it to parse.
   """
   @spec decode_stream({String.t(), String.t()}) :: {%{String.t() => any()}}
-  def decode_stream({raw_data, buffer}) do
+  def decode_stream({raw_data, buffer}, done \\ []) do
     # Data comes back like this:
     #
     # "data: {\"id\":\"chatcmpl-7e8yp1xBhriNXiqqZ0xJkgNrmMuGS\",\"object\":\"chat.completion.chunk\",\"created\":1689801995,\"model\":\"gpt-4-0613\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"function_call\":{\"name\":\"calculator\",\"arguments\":\"\"}},\"finish_reason\":null}]}\n\n
@@ -643,7 +621,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
     # any left-over buffer from a previous processing.
     raw_data
     |> String.split("data: ")
-    |> Enum.reduce({[], buffer}, fn str, {done, incomplete} = acc ->
+    |> Enum.reduce({done, buffer}, fn str, {done, incomplete} = acc ->
       # auto filter out "" and "[DONE]" by not including the accumulator
       str
       |> String.trim()
@@ -655,20 +633,31 @@ defmodule LangChain.ChatModels.ChatOpenAI do
           acc
 
         json ->
-          # combine with any previous incomplete data
-          starting_json = incomplete <> json
-
-          starting_json
-          |> Jason.decode()
-          |> case do
-            {:ok, parsed} ->
-              {done ++ [parsed], ""}
-
-            {:error, _reason} ->
-              {done, starting_json}
-          end
+          parse_combined_data(incomplete, json, done)
       end
     end)
+  end
+
+  defp parse_combined_data("", json, done) do
+    json
+    |> Jason.decode()
+    |> case do
+      {:ok, parsed} ->
+        {done ++ [parsed], ""}
+
+      {:error, _reason} ->
+        {done, json}
+    end
+  end
+
+  defp parse_combined_data(incomplete, json, done) do
+    # combine with any previous incomplete data
+    starting_json = incomplete <> json
+
+    # recursively call decode_stream so that the combined message data is split on "data: " again.
+    # the combined data may need re-splitting if the last message ended in the middle of the "data: " key.
+    # i.e. incomplete ends with "dat" and the new message starts with "a: {".
+    decode_stream({starting_json, ""}, done)
   end
 
   # Parse a new message response

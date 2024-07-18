@@ -485,8 +485,6 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
   describe "call/2" do
     @tag live_call: true, live_open_ai: true
     test "basic content example and fires ratelimit callback" do
-      # set_fake_llm_response({:ok, Message.new_assistant("\n\nRainbow Sox Co.")})
-
       handlers = %{
         on_llm_ratelimit_info: fn _model, headers ->
           send(self(), {:fired_ratelimit_info, headers})
@@ -525,8 +523,6 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
 
     @tag live_call: true, live_open_ai: true
     test "basic streamed content example's final result and fires ratelimit callback" do
-      # set_fake_llm_response({:ok, Message.new_assistant("\n\nRainbow Sox Co.")})
-
       handlers = %{
         on_llm_ratelimit_info: fn _model, headers ->
           send(self(), {:fired_ratelimit_info, headers})
@@ -601,8 +597,6 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
 
     @tag live_call: true, live_open_ai: true
     test "basic streamed content fires token usage callback" do
-      # set_fake_llm_response({:ok, Message.new_assistant("\n\nRainbow Sox Co.")})
-
       handlers = %{
         on_llm_token_usage: fn _model, usage ->
           send(self(), {:fired_token_usage, usage})
@@ -1277,6 +1271,25 @@ defmodule LangChain.ChatModels.ChatOpenAITest do
       # nothing incomplete. Parsed 1 object.
       assert incomplete == ""
       assert parsed == [json_1]
+    end
+
+    test "correctly parses when messages are split in the middle of \"data:\"" do
+      # message that ends in the middle of "data: "
+      buffered =
+        "{\"id\":\"chatcmpl-9mB4I7Cec88xzrOc7wEoxtKWyYczS\",\"object\":\"chat.completion.chunk\",\"created\":1721269318,\"model\":\"gpt-4o-2024-05-13\",\"system_fingerprint\":\"fp_c4e5b6fa31\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" jointly\"},\"logprobs\":null,\"finish_reason\":null}]}\n\nd"
+
+      # incomplete message chunk starting with the remaining chars of "data: "
+      data =
+        "ata: {\"id\":\"chatcmpl-9mB4I7Cec88xzrOc7wEoxtKWyYczS\",\"object\":\"chat.completion.chunk\",\"created\":1721269318,\"model\":\"gpt-4o-2024-05-13\",\"system_fingerprint\":\"fp_c4e5b6fa31\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" with\"},\"logprobs\":null,\"finish_reason\":null}]}"
+
+      {parsed, incomplete} = ChatOpenAI.decode_stream({data, buffered})
+
+      [message_1, message_2] =
+        (buffered <> data) |> String.split("data: ") |> Enum.map(&Jason.decode!/1)
+
+      # nothing incomplete. Parsed 2 objects.
+      assert incomplete == ""
+      assert parsed == [message_1, message_2]
     end
 
     test "correctly parses when data previously buffered and responses split and has leftovers",
