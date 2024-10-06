@@ -249,7 +249,7 @@ defmodule LangChain.ChatModels.ChatAnthropicTest do
       assert is_nil(struct.index)
     end
 
-    test "handles receiving a content_block_start event", %{model: model} do
+    test "handles receiving a content_block_start event for text", %{model: model} do
       response = %{
         "type" => "content_block_start",
         "index" => 0,
@@ -262,7 +262,7 @@ defmodule LangChain.ChatModels.ChatAnthropicTest do
       assert is_nil(struct.index)
     end
 
-    test "handles receiving a content_block_delta event", %{model: model} do
+    test "handles receiving a content_block_delta event for text", %{model: model} do
       response = %{
         "type" => "content_block_delta",
         "index" => 0,
@@ -273,6 +273,49 @@ defmodule LangChain.ChatModels.ChatAnthropicTest do
       assert struct.role == :assistant
       assert struct.content == "Hello"
       assert is_nil(struct.index)
+    end
+
+    test "handles receiving a content_block_start event for tool call", %{model: model} do
+      response = %{
+        "type" => "content_block_start",
+        "index" => 0,
+        "content_block" => %{
+          "type" => "tool_use",
+          "id" => "toolu_01T1x1fJ34qAmk2tNTrN7Up6",
+          "name" => "do_something"
+        }
+      }
+
+      assert %MessageDelta{} = struct = ChatAnthropic.do_process_response(model, response)
+      assert struct.role == :assistant
+      assert struct.content == nil
+      assert is_nil(struct.index)
+
+      assert [
+               %LangChain.Message.ToolCall{
+                 status: :incomplete,
+                 type: :function,
+                 call_id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6",
+                 name: "do_something",
+                 arguments: nil,
+                 index: 0
+               }
+             ] == struct.tool_calls
+    end
+
+    test "handles receiving a content_block_delta event for tool call", %{model: model} do
+      response = %{
+        "type" => "content_block_delta",
+        "index" => 0,
+        "delta" => %{"type" => "input_json_delta", "partial_json" => "{\"pr"}
+      }
+
+      assert %MessageDelta{} = struct = ChatAnthropic.do_process_response(model, response)
+      assert struct.role == :assistant
+      [tool_call] = struct.tool_calls
+      assert tool_call.type == :function
+      assert tool_call.arguments == "{\"pr"
+      assert tool_call.index == 0
     end
 
     test "handles receiving a message_delta event", %{model: model} do
@@ -673,29 +716,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
              ] = parsed
 
       assert buffer == ""
-    end
-  end
-
-  describe "split_system_message/1" do
-    test "returns system message and rest separately" do
-      system = Message.new_system!()
-      user_msg = Message.new_user!("Hi")
-      assert {system, [user_msg]} == ChatAnthropic.split_system_message([system, user_msg])
-    end
-
-    test "return nil when no system message set" do
-      user_msg = Message.new_user!("Hi")
-      assert {nil, [user_msg]} == ChatAnthropic.split_system_message([user_msg])
-    end
-
-    test "raises exception with multiple system messages" do
-      assert_raise LangChain.LangChainError,
-                   "Anthropic only supports a single System message",
-                   fn ->
-                     system = Message.new_system!()
-                     user_msg = Message.new_user!("Hi")
-                     ChatAnthropic.split_system_message([system, user_msg, system])
-                   end
     end
   end
 
@@ -1155,6 +1175,44 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
       #   ],
       # }
     end
+
+    @tag live_call: true, live_anthropic: true
+    test "streams a tool call with parameters" do
+      handler = %{
+        on_llm_new_delta: fn _model, delta ->
+          # IO.inspect(delta, label: "DELTA")
+          send(self(), {:streamed_fn, delta})
+        end
+      }
+
+      {:ok, chat} = ChatAnthropic.new(%{model: @test_model, stream: true, callbacks: [handler]})
+
+      text =
+        "People tell me I should be more patient, but I can't just sit around waiting for that to happen"
+
+      user_message = Message.new_user!("Use the 'do_something' tool with the value '#{text}'.")
+
+      tool =
+        Function.new!(%{
+          name: "do_something",
+          parameters: [FunctionParam.new!(%{type: :string, name: "value", required: true})],
+          function: fn _args, _context ->
+            # IO.inspect(args, label: "FUNCTION EXECUTED")
+            {:ok, "SUCCESS"}
+          end
+        })
+
+      # verbose: true
+      {:ok, updated_chain} =
+        LLMChain.new!(%{llm: chat, verbose: false})
+        |> LLMChain.add_message(user_message)
+        |> LLMChain.add_tools(tool)
+        |> LLMChain.run(mode: :until_success)
+
+      # has the result from the function execution
+      [tool_result] = updated_chain.last_message.tool_results
+      assert tool_result.content == "SUCCESS"
+    end
   end
 
   describe "works within a chain" do
@@ -1168,14 +1226,14 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         end
       }
 
-      {:ok, _result_chain, last_message} =
+      {:ok, updated_chain} =
         LLMChain.new!(%{llm: %ChatAnthropic{stream: true, callbacks: [handler]}})
         |> LLMChain.add_message(Message.new_user!("Say, 'Hi!'!"))
         |> LLMChain.run()
 
-      assert last_message.content == "Hi!"
-      assert last_message.status == :complete
-      assert last_message.role == :assistant
+      assert updated_chain.last_message.content == "Hi!"
+      assert updated_chain.last_message.status == :complete
+      assert updated_chain.last_message.role == :assistant
 
       assert_received {:streamed_fn, data}
       assert %MessageDelta{role: :assistant} = data
@@ -1197,14 +1255,14 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         end
       }
 
-      {:ok, _result_chain, last_message} =
+      {:ok, updated_chain} =
         LLMChain.new!(%{llm: %ChatAnthropic{stream: false, callbacks: [handler]}})
         |> LLMChain.add_message(Message.new_user!("Say, 'Hi!'!"))
         |> LLMChain.run()
 
-      assert last_message.content == "Hi!"
-      assert last_message.status == :complete
-      assert last_message.role == :assistant
+      assert updated_chain.last_message.content == "Hi!"
+      assert updated_chain.last_message.status == :complete
+      assert updated_chain.last_message.role == :assistant
 
       assert_received {:received_msg, data}
       assert %Message{role: :assistant} = data
@@ -1238,7 +1296,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         end
       }
 
-      {:ok, _result_chain, last_message} =
+      {:ok, updated_chain} =
         LLMChain.new!(%{
           llm: %ChatAnthropic{model: @test_model, stream: true, callbacks: [handler]}
         })
@@ -1248,9 +1306,9 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         |> LLMChain.add_message(Message.new_user!("What's the capitol of Norway?"))
         |> LLMChain.run()
 
-      assert last_message.content =~ "Oslo"
-      assert last_message.status == :complete
-      assert last_message.role == :assistant
+      assert updated_chain.last_message.content =~ "Oslo"
+      assert updated_chain.last_message.status == :complete
+      assert updated_chain.last_message.role == :assistant
 
       assert_received {:streamed_fn, data}
       assert %MessageDelta{role: :assistant} = data
